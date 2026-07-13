@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+
+# novaCTF / IMOD data files -- this is a code repo, not a data repo
+*.st
+*.mrc
+*.mrc_*
+*.rec
+*.xf
+*.xml
+*.tlt
+*.defocus*
+*.log
+taSolution.log
+novaCTF_process.log
+pytom.sbatch
+
+# OS cruft
+.DS_Store
