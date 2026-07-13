@@ -214,10 +214,19 @@ def step_xml_and_tlt(cfg, log_path):
     """
     Copy the Warp .xml for this tilt-series in and parse it directly --
     pulling Dose, Angles (tilt), and GridCTF (defocus) values out -- to write
-    the .tlt, .defocus, and dose .txt files novaCTF needs. Restricted to the
-    same views selected by cfg.secs (taSolution.log / --secs), renumbered
-    1..N in stack order, so line N always corresponds to projection N in the
-    aligned stack.
+    the .tlt, .defocus, and dose .txt files novaCTF needs.
+
+    cfg.xml_filtered controls how the xml's arrays relate to --secs:
+      - True  (--xml-filtered):   the xml already excludes skipped/bad views,
+        i.e. its Dose/Angles/GridCTF arrays are already 1:1 with the views
+        selected by --secs/taSolution.log, in the same order. Used as-is,
+        no further filtering.
+      - False (--xml-unfiltered): the xml contains every original view
+        (including ones dropped during alignment), so it's filtered down to
+        the --secs selection using 1-based indexing.
+
+    Either way, the result is renumbered 1..N in stack order, so line N
+    always corresponds to projection N in the aligned stack.
     """
     if skip_if_exists(cfg.nova_tlt, cfg.force) and skip_if_exists(cfg.nova_defocus_base, cfg.force):
         return
@@ -227,13 +236,12 @@ def step_xml_and_tlt(cfg, log_path):
     if xml_src.resolve() != xml_dst.resolve():
         run_cmd(["cp", str(xml_src), str(xml_dst)], log_path, cfg.dry_run)
 
-    log_line(log_path, f"parse {xml_dst} -> {cfg.nova_tlt}, {cfg.nova_defocus_base}, {cfg.nova_dose}")
-    click.echo(f"+ parsing {xml_dst} for tlt/defocus/dose (views {cfg.secs})")
+    mode = "already matches --secs 1:1" if cfg.xml_filtered else "will be filtered to --secs"
+    log_line(log_path, f"parse {xml_dst} -> {cfg.nova_tlt}, {cfg.nova_defocus_base}, {cfg.nova_dose} ({mode})")
+    click.echo(f"+ parsing {xml_dst} for tlt/defocus/dose (views {cfg.secs}, xml {mode})")
 
     if cfg.dry_run:
         return
-
-    selected = expand_secs(cfg.secs)
 
     tree = ET.parse(xml_dst)
     root = tree.getroot()
@@ -254,17 +262,32 @@ def step_xml_and_tlt(cfg, log_path):
         if not values:
             raise NovaCTFError(f"Found no {label} values in {xml_dst}")
 
-    max_index = max(selected)
-    for label, values in (("Dose", dose_all), ("Angles", tlt_all), ("GridCTF", defocus_all)):
-        if max_index > len(values):
-            raise NovaCTFError(
-                f"--secs/taSolution.log selects view {max_index}, but {xml_dst}'s {label} "
-                f"array only has {len(values)} entries."
-            )
-
-    dose_sel = [dose_all[i - 1] for i in selected]
-    tlt_sel = [tlt_all[i - 1] for i in selected]
-    defocus_sel = [defocus_all[i - 1] for i in selected]
+    if cfg.xml_filtered:
+        expected_n = len(expand_secs(cfg.secs))
+        for label, values in (("Dose", dose_all), ("Angles", tlt_all), ("GridCTF", defocus_all)):
+            if len(values) != expected_n:
+                raise NovaCTFError(
+                    f"--xml-filtered is set (xml assumed to already match --secs 1:1), but "
+                    f"{xml_dst}'s {label} has {len(values)} entries, expected {expected_n} "
+                    f"(from --secs {cfg.secs}). If the xml actually contains every original "
+                    f"view, rerun with --xml-unfiltered instead."
+                )
+        dose_sel, tlt_sel, defocus_sel = dose_all, tlt_all, defocus_all
+        n_written = expected_n
+    else:
+        selected = expand_secs(cfg.secs)
+        max_index = max(selected)
+        for label, values in (("Dose", dose_all), ("Angles", tlt_all), ("GridCTF", defocus_all)):
+            if max_index > len(values):
+                raise NovaCTFError(
+                    f"--secs/taSolution.log selects view {max_index}, but {xml_dst}'s {label} "
+                    f"array only has {len(values)} entries. If the xml already excludes "
+                    f"skipped views, rerun with --xml-filtered instead."
+                )
+        dose_sel = [dose_all[i - 1] for i in selected]
+        tlt_sel = [tlt_all[i - 1] for i in selected]
+        defocus_sel = [defocus_all[i - 1] for i in selected]
+        n_written = len(selected)
 
     np.savetxt(cfg.nova_tlt, tlt_sel, fmt="%f")
     np.savetxt(cfg.nova_dose, dose_sel, fmt="%f")
@@ -278,7 +301,7 @@ def step_xml_and_tlt(cfg, log_path):
     Path(cfg.nova_defocus_base).write_text("\n".join(lines))
 
     click.echo(
-        f"-> Wrote {len(selected)} lines to {cfg.nova_tlt}, {cfg.nova_defocus_base}, {cfg.nova_dose}"
+        f"-> Wrote {n_written} lines to {cfg.nova_tlt}, {cfg.nova_defocus_base}, {cfg.nova_dose}"
     )
 
 
@@ -499,6 +522,11 @@ class Config:
               show_default=True, help="Path to taSolution.log, used to auto-detect --secs.")
 @click.option("--xml-dir", type=click.Path(path_type=Path), default=None,
               help="Directory containing <name>.mrc.xml (the Warp xml file).")
+@click.option("--xml-filtered/--xml-unfiltered", default=True, show_default=True,
+              help="--xml-filtered: the xml's Dose/Angles/GridCTF arrays already exclude "
+                   "skipped/bad views and match --secs 1:1, used as-is. --xml-unfiltered: the "
+                   "xml contains every original view, and is filtered down to the --secs "
+                   "selection using 1-based indexing.")
 @click.option("--tomo-size", required=True,
               help="UNBINNED tomogram X,Y,thickness in px, e.g. '4096,5760,2400'. Divided by "
                    "--bin-factor to get SizeToOutputInXandY/FULLIMAGE and THICKNESS.")

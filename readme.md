@@ -43,8 +43,9 @@ automatically (`--force` to redo everything anyway).
    `.xf` files, using the sections from step 1.
 3. **xml copy + parse** -- copies the Warp `.xml` for this tilt-series in and
    parses its `Dose`/`Angles`/`GridCTF` elements directly to produce the
-   `.tlt`, `.defocus`, and dose `.txt` files, restricted to the same views
-   selected in step 1 and renumbered 1..N to match the aligned stack.
+   `.tlt`, `.defocus`, and dose `.txt` files, renumbered 1..N to match the
+   aligned stack. Whether it also needs to *select* which views (matching
+   step 1) depends on `--xml-filtered`/`--xml-unfiltered` -- see below.
 4. **Validation** -- compares the number of sections in the aligned stack
    against the number of lines in the `.tlt` file and fails immediately (with
    a clear message) if they don't match, instead of failing confusingly deep
@@ -114,6 +115,7 @@ A log of every command run (with timestamps) is written to
 | `--defocus-step` | `-DefocusStep` | In nm; smaller steps are more accurate at the cost of more sub-stacks/compute. |
 | `--amplitude-contrast`, `--cs`, `--volt` | `-AmplitudeContrast`, `-Cs`, `-Volt` | Microscope parameters, used only in the `ctfCorrection` step. |
 | `--final-bin` | -- | Must be an exact multiple of `--bin-factor`; `binvol -binning` gets `final_bin / bin_factor`. |
+| `--xml-filtered` / `--xml-unfiltered` | -- | Whether the Warp `.xml`'s `Dose`/`Angles`/`GridCTF` arrays already exclude skipped/bad views (`--xml-filtered`, default -- used as-is, must match `--secs` count exactly) or contain every original view (`--xml-unfiltered` -- filtered down to the `--secs` selection). Picking the wrong one either raises a clear count-mismatch error or silently selects the wrong views, so check which one matches your xml export. |
 
 ## Notes from getting this working
 
