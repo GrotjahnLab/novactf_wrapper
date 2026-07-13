@@ -29,7 +29,7 @@ logs every command it runs with a timestamp.
 ## Installation
 
 ```bash
-git clone <this-repo-url>
+git clone https://github.com/GrotjahnLab/novactf_wrapper.git
 cd novaCTF_wrapper
 pip install -r requirements.txt
 ```
