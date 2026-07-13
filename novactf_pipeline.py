@@ -4,8 +4,9 @@ novaCTF wrapper -- implements the full pipeline documented in readme.md:
 
   1. Parse taSolution.log to find which views survived alignment, and use
      them as the -secs range for newstack (aligned + binned 2D stack).
-  2. Copy the Warp .xml file and run xml2pytom.py to generate the .tlt and
-     .defocus files needed for the next stages.
+  2. Copy the Warp .xml file in and parse it directly (Dose, Angles,
+     GridCTF) to generate the .tlt, .defocus, and dose .txt files needed
+     for the next stages -- restricted to the same views selected in step 1.
   3. Validate that the stack size matches the tlt/defocus files.
   4. novaCTF -Algorithm defocus            -> generate shifted defocus files.
   5. novaCTF -Algorithm ctfCorrection       -> CTF-correct every defocus-
@@ -21,7 +22,7 @@ novaCTF wrapper -- implements the full pipeline documented in readme.md:
 Every step logs its command (with a timestamp) to novaCTF_process.log before
 running it, and every step is resumable: if its expected output already
 exists, it is skipped (use --force to redo it anyway). This must be run
-under WSL/Linux -- novaCTF, IMOD, and xml2pytom.py all require it.
+under WSL/Linux -- novaCTF and IMOD both require it.
 
 Example:
     python3 novactf_pipeline.py \\
@@ -40,10 +41,12 @@ import re
 import subprocess
 import sys
 import threading
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 
 import click
+import numpy as np
 
 _log_lock = threading.Lock()
 
@@ -112,6 +115,18 @@ def compact_ranges(views) -> str:
     return ",".join(str(a) if a == b else f"{a}-{b}" for a, b in ranges)
 
 
+def expand_secs(secs: str) -> list:
+    """Inverse of compact_ranges: '4-9,11-36' -> [4,5,...,9,11,...,36] (1-based, ordered)."""
+    indices = []
+    for part in secs.split(","):
+        if "-" in part:
+            a, b = part.split("-")
+            indices.extend(range(int(a), int(b) + 1))
+        else:
+            indices.append(int(part))
+    return indices
+
+
 def parse_ta_solution_sections(log_path: Path) -> str:
     """
     Parse taSolution.log for the 'view rotation tilt deltilt mag ...' solution
@@ -177,13 +192,9 @@ def step_newstack(cfg, log_path):
     if skip_if_exists(cfg.nova_stack, cfg.force):
         return
 
-    secs = cfg.secs
-    if secs is None:
-        secs = parse_ta_solution_sections(cfg.ta_solution_log)
-
     cmd = [
         "newstack",
-        "-secs", secs,
+        "-secs", cfg.secs,
         "-fromone",
         "-InputFile", f"{cfg.name}.mrc.st",
         "-OutputFile", str(cfg.nova_stack),
@@ -200,16 +211,75 @@ def step_newstack(cfg, log_path):
 
 
 def step_xml_and_tlt(cfg, log_path):
-    if skip_if_exists(cfg.nova_tlt, cfg.force) and skip_if_exists(cfg.nova_defocus_base_ready_marker(), False):
+    """
+    Copy the Warp .xml for this tilt-series in and parse it directly --
+    pulling Dose, Angles (tilt), and GridCTF (defocus) values out -- to write
+    the .tlt, .defocus, and dose .txt files novaCTF needs. Restricted to the
+    same views selected by cfg.secs (taSolution.log / --secs), renumbered
+    1..N in stack order, so line N always corresponds to projection N in the
+    aligned stack.
+    """
+    if skip_if_exists(cfg.nova_tlt, cfg.force) and skip_if_exists(cfg.nova_defocus_base, cfg.force):
         return
 
     xml_src = cfg.xml_dir / f"{cfg.name}.mrc.xml"
     xml_dst = Path(f"{cfg.name}.mrc.xml")
     if xml_src.resolve() != xml_dst.resolve():
-        cmd = ["cp", str(xml_src), str(xml_dst)]
-        run_cmd(cmd, log_path, cfg.dry_run)
+        run_cmd(["cp", str(xml_src), str(xml_dst)], log_path, cfg.dry_run)
 
-    run_cmd(["python3", str(cfg.xml2pytom_script), str(xml_dst)], log_path, cfg.dry_run)
+    log_line(log_path, f"parse {xml_dst} -> {cfg.nova_tlt}, {cfg.nova_defocus_base}, {cfg.nova_dose}")
+    click.echo(f"+ parsing {xml_dst} for tlt/defocus/dose (views {cfg.secs})")
+
+    if cfg.dry_run:
+        return
+
+    selected = expand_secs(cfg.secs)
+
+    tree = ET.parse(xml_dst)
+    root = tree.getroot()
+
+    dose_node = root.find("Dose")
+    angles_node = root.find("Angles")
+    defocus_node = root.find("GridCTF")
+    if dose_node is None or angles_node is None or defocus_node is None:
+        raise NovaCTFError(
+            f"{xml_dst} is missing one of the expected <Dose>/<Angles>/<GridCTF> elements"
+        )
+
+    dose_all = [float(v) for v in dose_node.text.split("\n") if v.strip()]
+    tlt_all = [float(v) for v in angles_node.text.split("\n") if v.strip()]
+    defocus_all = [int(round(float(node.get("Value")) * 10000)) for node in defocus_node.findall("Node")]
+
+    for label, values in (("Dose", dose_all), ("Angles", tlt_all), ("GridCTF", defocus_all)):
+        if not values:
+            raise NovaCTFError(f"Found no {label} values in {xml_dst}")
+
+    max_index = max(selected)
+    for label, values in (("Dose", dose_all), ("Angles", tlt_all), ("GridCTF", defocus_all)):
+        if max_index > len(values):
+            raise NovaCTFError(
+                f"--secs/taSolution.log selects view {max_index}, but {xml_dst}'s {label} "
+                f"array only has {len(values)} entries."
+            )
+
+    dose_sel = [dose_all[i - 1] for i in selected]
+    tlt_sel = [tlt_all[i - 1] for i in selected]
+    defocus_sel = [defocus_all[i - 1] for i in selected]
+
+    np.savetxt(cfg.nova_tlt, tlt_sel, fmt="%f")
+    np.savetxt(cfg.nova_dose, dose_sel, fmt="%f")
+
+    lines = []
+    for i, (tlt, defocus) in enumerate(zip(tlt_sel, defocus_sel)):
+        line = f"{i + 1}\t{i + 1}\t{tlt}\t{tlt}\t{defocus}"
+        if i == 0:
+            line += "\t2"
+        lines.append(line)
+    Path(cfg.nova_defocus_base).write_text("\n".join(lines))
+
+    click.echo(
+        f"-> Wrote {len(selected)} lines to {cfg.nova_tlt}, {cfg.nova_defocus_base}, {cfg.nova_dose}"
+    )
 
 
 def step_validate(cfg, log_path):
@@ -406,12 +476,10 @@ class Config:
         self.nova_stack = Path(f"{self.nova_base}.mrc")
         self.nova_tlt = Path(f"{self.nova_base}.tlt")
         self.nova_defocus_base = f"{self.nova_base}.defocus"
+        self.nova_dose = Path(f"{self.nova_base}.dose.txt")
         self.nova_rec = Path(f"{self.nova_base}.rec")
         self.nova_trim = Path(f"{self.nova_base}_trim.rec")
         self.nova_bin = Path(f"{self.nova_base}_bin{self.final_bin}.rec")
-
-    def nova_defocus_base_ready_marker(self):
-        return Path(f"{self.nova_defocus_base}_0")
 
 
 # --------------------------------------------------------------------------
@@ -431,8 +499,6 @@ class Config:
               show_default=True, help="Path to taSolution.log, used to auto-detect --secs.")
 @click.option("--xml-dir", type=click.Path(path_type=Path), default=None,
               help="Directory containing <name>.mrc.xml (the Warp xml file).")
-@click.option("--xml2pytom-script", type=click.Path(path_type=Path), default=Path("./xml2pytom.py"),
-              show_default=True, help="Path to xml2pytom.py.")
 @click.option("--tomo-size", required=True,
               help="UNBINNED tomogram X,Y,thickness in px, e.g. '4096,5760,2400'. Divided by "
                    "--bin-factor to get SizeToOutputInXandY/FULLIMAGE and THICKNESS.")
@@ -520,6 +586,17 @@ def main(**kwargs):
     log_line(log_path, f"=== novaCTF pipeline started for {cfg.name} ===")
 
     try:
+        if cfg.secs is None:
+            if cfg.ta_solution_log.exists():
+                cfg.secs = parse_ta_solution_sections(cfg.ta_solution_log)
+            elif cfg.dry_run:
+                cfg.secs = "1-1"
+                click.echo("(dry-run) no taSolution.log -- using placeholder --secs 1-1")
+            else:
+                raise NovaCTFError(f"{cfg.ta_solution_log} does not exist and no --secs was given")
+        else:
+            click.echo(f"-> Using manual --secs {cfg.secs}")
+
         step_newstack(cfg, log_path)
         step_xml_and_tlt(cfg, log_path)
         step_validate(cfg, log_path)

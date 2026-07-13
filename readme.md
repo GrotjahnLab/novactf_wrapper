@@ -13,18 +13,11 @@ logs every command it runs with a timestamp.
 
 ## Requirements
 
-- **WSL or native Linux.** novaCTF, IMOD, and `xml2pytom.py` all need to run
-  under Linux -- running `xml2pytom.py` on Windows produces `.tlt`/`.defocus`
-  files with the wrong line endings/formatting.
+- **WSL or native Linux.** novaCTF and IMOD both need to run under Linux.
 - [IMOD](https://bio3d.colorado.edu/imod/) (`newstack`, `clip`, `header`,
   `trimvol`, `binvol`) on your `PATH`.
 - [novaCTF](https://github.com/turonova/novaCTF) compiled and on your `PATH`.
-- Python 3 with `click` installed (`pip install click`).
-- A working `xml2pytom.py` (included) that turns a Warp `.xml` per-tilt-series
-  file into the `.tlt`/`.defocus`/dose `.txt` files novaCTF needs. **Edit the
-  constants at the top of `xml2pytom.py`** (`tomo_dir`, `ref_name`,
-  `mask_name`, box/search sizes, GPU list, pixel size, etc.) for your dataset
-  before running it -- it's a per-project script, not a CLI tool.
+- Python 3 with `click` and `numpy` installed (`pip install -r requirements.txt`).
 
 ## Installation
 
@@ -48,9 +41,10 @@ automatically (`--force` to redo everything anyway).
    with `--secs` if you already know the range.
 2. **`newstack`** -- builds the aligned, binned 2D stack from the raw `.st` +
    `.xf` files, using the sections from step 1.
-3. **xml copy + `xml2pytom.py`** -- copies the Warp `.xml` for this
-   tilt-series in and runs `xml2pytom.py` to produce the `.tlt` and
-   `.defocus` files.
+3. **xml copy + parse** -- copies the Warp `.xml` for this tilt-series in and
+   parses its `Dose`/`Angles`/`GridCTF` elements directly to produce the
+   `.tlt`, `.defocus`, and dose `.txt` files, restricted to the same views
+   selected in step 1 and renumbered 1..N to match the aligned stack.
 4. **Validation** -- compares the number of sections in the aligned stack
    against the number of lines in the `.tlt` file and fails immediately (with
    a clear message) if they don't match, instead of failing confusingly deep
@@ -154,10 +148,14 @@ A log of every command run (with timestamps) is written to
 
 ## Files
 
-- `novactf_pipeline.py` -- the full pipeline, run this.
-- `xml2pytom.py` -- converts a Warp `.xml` into `.tlt`/`.defocus`/dose files;
-  also emits a `pytom_match_template.py` submission script. Edit the
-  constants at the top per dataset.
+- `novactf_pipeline.py` -- the full pipeline, run this. Parses the Warp
+  `.xml` directly (no external script needed) to produce the `.tlt`,
+  `.defocus`, and dose `.txt` files.
+- `xml2pytom.py` -- the original standalone xml-to-pytom converter this was
+  based on; also emits a `pytom_match_template.py` submission script for
+  downstream template matching. Kept for reference/that separate use case --
+  no longer called by `novactf_pipeline.py`. Edit the constants at the top
+  per dataset if you use it directly.
 - `ctf_correction.sh`, `flip_filter.sh` -- earlier, single-purpose shell
   scripts covering steps 6 and 7 individually. Kept for reference/debugging;
   `novactf_pipeline.py` supersedes them.
